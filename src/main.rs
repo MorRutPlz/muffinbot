@@ -7,7 +7,7 @@ use serenity::{
     model::{
         guild::Member,
         id::{GuildId, UserId},
-        prelude::{OnlineStatus, Ready, User},
+        prelude::{Activity, OnlineStatus, Ready, User},
     },
     prelude::TypeMapKey,
 };
@@ -21,7 +21,11 @@ pub struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
-        ctx.set_presence(None, OnlineStatus::Invisible).await;
+        ctx.set_presence(
+            Some(Activity::playing("Cupcakes are good :3")),
+            OnlineStatus::Invisible,
+        )
+        .await;
 
         info!("Ready!");
     }
