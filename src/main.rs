@@ -23,7 +23,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
         ctx.set_presence(
             Some(Activity::playing("Cupcakes are good :3")),
-            OnlineStatus::Invisible,
+            OnlineStatus::Online,
         )
         .await;
 
