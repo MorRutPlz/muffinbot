@@ -150,7 +150,7 @@ impl TypeMapKey for RateLimit {
 async fn main() {
     env_logger::init();
 
-    let mut client = Client::builder("ODQ1MzIzMzUzODk5NjYzNDIy.YKfSuA.7qr_0OHOuk8GuPgAYUFTEdvZZbs")
+    let mut client = Client::builder(std::env::var("TOKEN").unwrap())
         .event_handler(Handler)
         .intents(GatewayIntents::all())
         .await
