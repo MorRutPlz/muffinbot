@@ -1,0 +1,27 @@
+[package]
+name = "muffinbot"
+version = "0.1.0"
+authors = ["Alsan Ali <morrutplz@protonmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+env_logger = "0.8.3"
+log = "0.4.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[dependencies.serenity]
+git = "https://github.com/serenity-rs/serenity.git"
+branch = "current"
+default-features = false
+features = [
+    "builder",
+    "cache",
+    "client",
+    "gateway",
+    "http",
+    "model",
+    "utils",
+    "rustls_backend",
+]
