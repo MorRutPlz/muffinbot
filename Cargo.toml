@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 env_logger = "0.8.3"
+humantime = "2.1.0"
 log = "0.4.14"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 

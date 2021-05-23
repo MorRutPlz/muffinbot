@@ -566,6 +566,7 @@ name = "muffinbot"
 version = "0.0.0"
 dependencies = [
  "env_logger",
+ "humantime",
  "log",
  "serenity",
  "tokio",

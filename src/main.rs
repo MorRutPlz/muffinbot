@@ -5,15 +5,16 @@ use serenity::{
     async_trait,
     client::{bridge::gateway::GatewayIntents, Client, Context, EventHandler},
     model::{
-        guild::Member,
-        id::{GuildId, UserId},
+        channel::Message,
+        guild::{Action, ActionMember, Member},
+        id::{ChannelId, GuildId, UserId},
         prelude::{Activity, OnlineStatus, Ready, User},
     },
     prelude::TypeMapKey,
 };
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
+use std::{collections::HashMap, time::SystemTime};
 use tokio::time::interval;
 
 pub struct Handler;
@@ -22,12 +23,67 @@ pub struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
         ctx.set_presence(
-            Some(Activity::playing("Cupcakes are good :3")),
+            Some(Activity::playing("DM me to post a confession! >:3")),
             OnlineStatus::Online,
         )
         .await;
 
         info!("Ready!");
+    }
+
+    async fn message(&self, ctx: Context, new_message: Message) {
+        if new_message.is_private() && !new_message.is_own(&ctx.cache).await {
+            let mut data = ctx.data.write().await;
+            let rate_limit = data.get_mut::<ConfessionRateLimit>().unwrap();
+
+            let current = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+
+            match rate_limit.get(&new_message.author.id) {
+                Some(last_sent) => {
+                    if current - *last_sent < 1800 {
+                        let mut message = String::new();
+                        message.push_str("You can only send one confession every 30 minutes! ");
+                        message.push_str("Time remaining: ");
+                        message.push_str(
+                            &humantime::format_duration(Duration::from_secs(
+                                1800 - ((current - last_sent) as u64),
+                            ))
+                            .to_string(),
+                        );
+
+                        match new_message.reply(&ctx.http, &message).await {
+                            Ok(_) => {}
+                            Err(e) => println!("failed to send rate limit message: {}", e),
+                        }
+
+                        return;
+                    }
+                }
+                None => {}
+            }
+
+            let message = new_message.content_safe(&ctx.cache).await;
+
+            match ChannelId(846029848052629574)
+                .send_message(&ctx.http, |m| {
+                    m.content(format!("**CONFESSION**\n{}", message))
+                })
+                .await
+            {
+                Ok(message) => {
+                    rate_limit.insert(new_message.author.id, message.timestamp.timestamp());
+
+                    match new_message.reply(&ctx.http, "Sent confession <3").await {
+                        Ok(_) => {}
+                        Err(e) => println!("failed to send confirm message: {}", e),
+                    };
+                }
+                Err(e) => println!("failed to send message: {}", e),
+            }
+        }
     }
 
     async fn guild_member_removal(
@@ -38,15 +94,49 @@ impl EventHandler for Handler {
         _member_data_if_available: Option<Member>,
     ) {
         let mut data = ctx.data.write().await;
-        let rate_limit = data.get_mut::<RateLimit>().unwrap();
+        let rate_limit = data.get_mut::<KickBanRateLimit>().unwrap();
 
         match guild_id
-            .audit_logs(&ctx.http, None, None, None, Some(1))
+            .audit_logs(&ctx.http, None, None, None, Some(5))
             .await
         {
             Ok(n) => {
-                let entries = n.entries.values().collect::<Vec<_>>();
-                let tag = entries[0]
+                let mut entries = n.entries.values().collect::<Vec<_>>();
+                entries.sort_by(|a, b| {
+                    snowflake_to_time(a.id.0)
+                        .partial_cmp(&snowflake_to_time(b.id.0))
+                        .unwrap()
+                });
+
+                entries.reverse();
+
+                let mut entries = entries.into_iter();
+
+                let entry = loop {
+                    match entries.next() {
+                        Some(entry) => match entry.action {
+                            Action::Member(ActionMember::Kick)
+                            | Action::Member(ActionMember::BanAdd) => {
+                                if entry.target_id.unwrap() == kicked_user.id.0 {
+                                    break entry;
+                                }
+                            }
+                            _ => {}
+                        },
+                        None => return,
+                    }
+                };
+
+                match entry.action {
+                    Action::Member(ActionMember::Kick) | Action::Member(ActionMember::BanAdd) => {
+                        if entry.target_id.unwrap() != kicked_user.id.0 {
+                            return;
+                        }
+                    }
+                    _ => return,
+                }
+
+                let tag = entry
                     .user_id
                     .to_user(&ctx.http)
                     .await
@@ -55,16 +145,16 @@ impl EventHandler for Handler {
 
                 let to_notify = vec![807224123691761704, 805035493627920385];
 
-                match rate_limit.get_mut(&entries[0].user_id) {
+                match rate_limit.get_mut(&entry.user_id) {
                     Some(n) => {
                         *n += 1;
 
-                        debug!("user = {}; count = {}", entries[0].user_id.0, *n);
+                        debug!("user = {}; count = {}", entry.user_id.0, *n);
 
                         if *n < 5 {
                             let message = format!(
                                 "<@{}> ({}) has just kicked/banned <@{}> ({})",
-                                entries[0].user_id.0,
+                                entry.user_id.0,
                                 tag,
                                 kicked_user.id.0,
                                 kicked_user.tag(),
@@ -80,18 +170,18 @@ impl EventHandler for Handler {
                         drop(rate_limit);
                         drop(data);
 
-                        debug!("user = {}; removing admin roles", entries[0].user_id.0);
+                        debug!("user = {}; removing admin roles", entry.user_id.0);
 
                         let message = format!(
                             "<@{}> ({}) has had their admin role removed",
-                            entries[0].user_id.0, tag,
+                            entry.user_id.0, tag,
                         );
 
                         for id in to_notify.clone() {
                             send_message(&ctx, id, &message).await;
                         }
 
-                        match guild_id.member(&ctx.http, entries[0].user_id).await {
+                        match guild_id.member(&ctx.http, entry.user_id).await {
                             Ok(mut n) => {
                                 for role in vec![834782660148592700, 834912308169015387] {
                                     match n.remove_role(&ctx.http, role).await {
@@ -108,16 +198,16 @@ impl EventHandler for Handler {
                         }
                     }
                     None => {
-                        rate_limit.insert(entries[0].user_id, 1);
+                        rate_limit.insert(entry.user_id, 1);
 
                         drop(rate_limit);
                         drop(data);
 
-                        debug!("user = {}; count = 1", entries[0].user_id.0);
+                        debug!("user = {}; count = 1", entry.user_id.0);
 
                         let message = format!(
                             "<@{}> ({}) has just kicked/banned <@{}> ({})",
-                            entries[0].user_id.0,
+                            entry.user_id.0,
                             tag,
                             kicked_user.id.0,
                             kicked_user.tag(),
@@ -144,10 +234,15 @@ async fn send_message(ctx: &Context, user_id: u64, content: &str) {
     }
 }
 
-struct RateLimit;
+struct KickBanRateLimit;
+struct ConfessionRateLimit;
 
-impl TypeMapKey for RateLimit {
+impl TypeMapKey for KickBanRateLimit {
     type Value = HashMap<UserId, usize>;
+}
+
+impl TypeMapKey for ConfessionRateLimit {
+    type Value = HashMap<UserId, i64>;
 }
 
 #[tokio::main]
@@ -160,11 +255,11 @@ async fn main() {
         .await
         .expect("Error creating client");
 
-    client
-        .data
-        .write()
-        .await
-        .insert::<RateLimit>(HashMap::new());
+    {
+        let mut data = client.data.write().await;
+        data.insert::<KickBanRateLimit>(HashMap::new());
+        data.insert::<ConfessionRateLimit>(HashMap::new());
+    }
 
     {
         let data = client.data.clone();
@@ -176,7 +271,7 @@ async fn main() {
                 interval.tick().await;
 
                 let mut data = data.write().await;
-                let rate_limit = data.get_mut::<RateLimit>().unwrap();
+                let rate_limit = data.get_mut::<KickBanRateLimit>().unwrap();
 
                 debug!("600 seconds elapsed - clearing rate limit map");
 
@@ -188,4 +283,8 @@ async fn main() {
     if let Err(why) = client.start().await {
         eprintln!("An error occurred while running the client: {:?}", why);
     }
+}
+
+fn snowflake_to_time(snowflake: u64) -> u64 {
+    (snowflake >> 22) + 1420070400000
 }
