@@ -5,8 +5,8 @@ use serenity::{
     async_trait,
     client::{bridge::gateway::GatewayIntents, Client, Context, EventHandler},
     model::{
-        channel::Message,
-        guild::{Action, ActionMember, Member},
+        channel::{GuildChannel, Message},
+        guild::{Action, ActionChannel, ActionMember, Member},
         id::{ChannelId, GuildId, UserId},
         prelude::{Activity, OnlineStatus, Ready, User},
     },
@@ -16,6 +16,9 @@ use serenity::{
 use std::time::{Duration, UNIX_EPOCH};
 use std::{collections::HashMap, time::SystemTime};
 use tokio::time::interval;
+
+static ADMIN_ROLES: [u64; 2] = [834782660148592700, 834912308169015387];
+static TO_NOTIFY: [u64; 2] = [807224123691761704, 805035493627920385];
 
 pub struct Handler;
 
@@ -86,6 +89,118 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn channel_create(&self, ctx: Context, channel: &GuildChannel) {
+        let mut data = ctx.data.write().await;
+        let rate_limit = data.get_mut::<ChannelCreateRateLimit>().unwrap();
+
+        match channel
+            .guild_id
+            .audit_logs(&ctx.http, None, None, None, Some(5))
+            .await
+        {
+            Ok(n) => {
+                let mut entries = n.entries.values().collect::<Vec<_>>();
+                entries.sort_by(|a, b| {
+                    snowflake_to_time(a.id.0)
+                        .partial_cmp(&snowflake_to_time(b.id.0))
+                        .unwrap()
+                });
+
+                entries.reverse();
+
+                let mut entries = entries.into_iter();
+
+                let entry = loop {
+                    match entries.next() {
+                        Some(entry) => match entry.action {
+                            Action::Channel(ActionChannel::Create) => {
+                                if entry.target_id.unwrap() == channel.id.0 {
+                                    break entry;
+                                }
+                            }
+                            _ => {}
+                        },
+                        None => return,
+                    }
+                };
+
+                let tag = entry
+                    .user_id
+                    .to_user(&ctx.http)
+                    .await
+                    .map(|x| x.tag())
+                    .unwrap_or("unknown-user".to_string());
+
+                match rate_limit.get_mut(&entry.user_id) {
+                    Some(n) => {
+                        *n += 1;
+
+                        if *n < 10 {
+                            let message = format!(
+                                "<@{}> ({}) has just created channel ({})",
+                                entry.user_id.0,
+                                tag,
+                                channel.name(),
+                            );
+
+                            for id in TO_NOTIFY.iter() {
+                                send_message(&ctx, *id, &message).await;
+                            }
+
+                            return;
+                        }
+
+                        drop(rate_limit);
+                        drop(data);
+
+                        let message = format!(
+                            "<@{}> ({}) has had their admin role removed",
+                            entry.user_id.0, tag,
+                        );
+
+                        for id in TO_NOTIFY.iter() {
+                            send_message(&ctx, *id, &message).await;
+                        }
+
+                        match channel.guild_id.member(&ctx.http, entry.user_id).await {
+                            Ok(mut n) => {
+                                for role in ADMIN_ROLES.iter() {
+                                    match n.remove_role(&ctx.http, *role).await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            warn!("Error removing role: {}", e)
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error getting member: {}", e);
+                            }
+                        }
+                    }
+                    None => {
+                        rate_limit.insert(entry.user_id, 1);
+
+                        drop(rate_limit);
+                        drop(data);
+
+                        let message = format!(
+                            "<@{}> ({}) has just created channel ({})",
+                            entry.user_id.0,
+                            tag,
+                            channel.name(),
+                        );
+
+                        for id in TO_NOTIFY.iter() {
+                            send_message(&ctx, *id, &message).await;
+                        }
+                    }
+                }
+            }
+            Err(e) => error!("Error getting audit logs: {}", e),
+        }
+    }
+
     async fn guild_member_removal(
         &self,
         ctx: Context,
@@ -143,8 +258,6 @@ impl EventHandler for Handler {
                     .map(|x| x.tag())
                     .unwrap_or("unknown-user".to_string());
 
-                let to_notify = vec![807224123691761704, 805035493627920385];
-
                 match rate_limit.get_mut(&entry.user_id) {
                     Some(n) => {
                         *n += 1;
@@ -160,8 +273,8 @@ impl EventHandler for Handler {
                                 kicked_user.tag(),
                             );
 
-                            for id in to_notify.clone() {
-                                send_message(&ctx, id, &message).await;
+                            for id in TO_NOTIFY.iter() {
+                                send_message(&ctx, *id, &message).await;
                             }
 
                             return;
@@ -177,14 +290,14 @@ impl EventHandler for Handler {
                             entry.user_id.0, tag,
                         );
 
-                        for id in to_notify.clone() {
-                            send_message(&ctx, id, &message).await;
+                        for id in TO_NOTIFY.iter() {
+                            send_message(&ctx, *id, &message).await;
                         }
 
                         match guild_id.member(&ctx.http, entry.user_id).await {
                             Ok(mut n) => {
-                                for role in vec![834782660148592700, 834912308169015387] {
-                                    match n.remove_role(&ctx.http, role).await {
+                                for role in ADMIN_ROLES.iter() {
+                                    match n.remove_role(&ctx.http, *role).await {
                                         Ok(_) => {}
                                         Err(e) => {
                                             warn!("Error removing role: {}", e)
@@ -213,8 +326,8 @@ impl EventHandler for Handler {
                             kicked_user.tag(),
                         );
 
-                        for id in to_notify.clone() {
-                            send_message(&ctx, id, &message).await;
+                        for id in TO_NOTIFY.iter() {
+                            send_message(&ctx, *id, &message).await;
                         }
                     }
                 }
@@ -234,15 +347,20 @@ async fn send_message(ctx: &Context, user_id: u64, content: &str) {
     }
 }
 
-struct KickBanRateLimit;
+struct ChannelCreateRateLimit;
 struct ConfessionRateLimit;
+struct KickBanRateLimit;
 
-impl TypeMapKey for KickBanRateLimit {
+impl TypeMapKey for ChannelCreateRateLimit {
     type Value = HashMap<UserId, usize>;
 }
 
 impl TypeMapKey for ConfessionRateLimit {
     type Value = HashMap<UserId, i64>;
+}
+
+impl TypeMapKey for KickBanRateLimit {
+    type Value = HashMap<UserId, usize>;
 }
 
 #[tokio::main]
@@ -257,8 +375,9 @@ async fn main() {
 
     {
         let mut data = client.data.write().await;
-        data.insert::<KickBanRateLimit>(HashMap::new());
+        data.insert::<ChannelCreateRateLimit>(HashMap::new());
         data.insert::<ConfessionRateLimit>(HashMap::new());
+        data.insert::<KickBanRateLimit>(HashMap::new());
     }
 
     {
