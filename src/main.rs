@@ -4,6 +4,7 @@ mod logger;
 use serenity::{
     async_trait,
     client::{bridge::gateway::GatewayIntents, Client, Context, EventHandler},
+    http::AttachmentType,
     model::{
         channel::{GuildChannel, Message},
         guild::{Action, ActionChannel, ActionMember, Member},
@@ -72,6 +73,15 @@ impl EventHandler for Handler {
 
             match ChannelId(846029848052629574)
                 .send_message(&ctx.http, |m| {
+                    for i in 0..new_message.attachments.len() {
+                        match new_message.attachments[i].width {
+                            Some(_) => {
+                                m.add_file(AttachmentType::Image(&new_message.attachments[i].url));
+                            }
+                            None => {}
+                        }
+                    }
+
                     m.content(format!("**CONFESSION**\n{}", message))
                 })
                 .await
